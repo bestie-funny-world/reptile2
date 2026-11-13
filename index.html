@@ -1,0 +1,681 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#d5d2c5">
+<title>Living Serpent — Interactive Art</title>
+
+<style>
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #d5d2c5;
+}
+
+body {
+    font-family: "Courier New", monospace;
+    touch-action: none;
+}
+
+#stage {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background:
+        radial-gradient(ellipse at 50% 46%,
+        #dedbcf 0%, #d5d2c5 72%, #cecbbe 100%);
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+}
+
+#panel {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 9px;
+    z-index: 5;
+}
+
+#status {
+    color: #77766c;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+#cameraButton {
+    border: 1px solid rgba(60,60,50,.45);
+    border-radius: 2px;
+    padding: 12px 19px;
+    background: rgba(25,25,22,.92);
+    color: #e5e1d5;
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: .25s ease;
+}
+
+#cameraButton:hover {
+    background: #34342e;
+}
+
+#cameraButton:disabled {
+    opacity: .55;
+    cursor: default;
+}
+
+#camera {
+    display: none;
+}
+
+@media (max-width: 600px) {
+    #panel {
+        bottom: 16px;
+    }
+
+    #status {
+        font-size: 9px;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div id="stage">
+    <canvas id="art"></canvas>
+</div>
+
+<div id="panel">
+    <div id="status">MOUSE / TOUCH CONTROL ACTIVE</div>
+    <button id="cameraButton">ENABLE HAND CONTROL</button>
+</div>
+
+<video id="camera" autoplay playsinline muted></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+"use strict";
+
+/* =====================================
+   1. CANVAS SETUP
+===================================== */
+
+const canvas = document.getElementById("art");
+const ctx = canvas.getContext("2d");
+
+const statusText = document.getElementById("status");
+const cameraButton = document.getElementById("cameraButton");
+const video = document.getElementById("camera");
+
+let W = 0;
+let H = 0;
+let DPR = 1;
+
+function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+window.addEventListener("resize", resize);
+resize();
+
+
+/* =====================================
+   2. MOVEMENT ENGINE
+===================================== */
+
+const pointer = {
+    x: 0,
+    y: 0,
+    targetX: 0,
+    targetY: 0,
+    angle: 0,
+    targetAngle: 0,
+    velocityX: 0,
+    velocityY: 0
+};
+
+function updateTarget(clientX, clientY) {
+    const nx = clientX / W;
+    const ny = clientY / H;
+
+    pointer.targetX = (nx - 0.5) * 135;
+    pointer.targetY = (ny - 0.5) * 105;
+
+    pointer.targetAngle = (nx - 0.5) * 0.20;
+}
+
+window.addEventListener("pointermove", e => {
+    if (e.pointerType === "mouse" ||
+        e.pointerType === "touch") {
+        updateTarget(e.clientX, e.clientY);
+    }
+});
+
+
+/* =====================================
+   3. BODY CENTERLINE
+===================================== */
+
+function bodyPoint(t, sway) {
+    const x =
+        -76 * t * t +
+        Math.sin(t * Math.PI) * sway * 0.65 +
+        Math.sin(t * 5.4) * 2.2;
+
+    const y = -226 + t * 414;
+
+    return { x, y };
+}
+
+function bodyTangent(t, sway) {
+    const a = bodyPoint(Math.max(0, t - 0.002), sway);
+    const b = bodyPoint(Math.min(1, t + 0.002), sway);
+
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+
+    return {
+        x: dx / length,
+        y: dy / length
+    };
+}
+
+
+/* =====================================
+   4. DRAWING HELPERS
+===================================== */
+
+function strokePath(points, color, width, alpha = 1) {
+    if (points.length < 2) return;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+
+    for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+    }
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.globalAlpha = alpha;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.restore();
+}
+
+function drawCurve(start, control1, control2, end,
+                   color, width, alpha = 1) {
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+
+    ctx.bezierCurveTo(
+        control1.x, control1.y,
+        control2.x, control2.y,
+        end.x, end.y
+    );
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.globalAlpha = alpha;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.restore();
+}
+
+
+/* =====================================
+   5. OUTER SPINES
+===================================== */
+
+function drawOuterSpines(time, sway) {
+
+    const count = 18;
+
+    for (let side of [-1, 1]) {
+
+        for (let i = 0; i < count; i++) {
+
+            const t = 0.16 + i * 0.043;
+            const anchor = bodyPoint(t, sway);
+
+            const wave = Math.sin(time * 0.0018 + i * 0.4);
+
+            const length = 115 + i * 10;
+            const spread = length * (0.70 + wave * 0.025);
+
+            const end = {
+                x: anchor.x + side * spread,
+                y: anchor.y - length * 0.87
+                    + i * 3
+            };
+
+            const c1 = {
+                x: anchor.x + side * length * 0.34,
+                y: anchor.y - length * 0.06
+            };
+
+            const c2 = {
+                x: anchor.x + side * length * 0.80,
+                y: anchor.y - length * 0.42
+            };
+
+            drawCurve(
+                anchor, c1, c2, end,
+                "#77766d", 2.05, 0.85
+            );
+
+            /* Fine highlight beside each spine */
+            const innerEnd = {
+                x: end.x - side * 7,
+                y: end.y + 8
+            };
+
+            drawCurve(
+                {x: anchor.x + side * 5, y: anchor.y + 4},
+                {x: c1.x - side * 3, y: c1.y + 5},
+                {x: c2.x - side * 4, y: c2.y + 5},
+                innerEnd,
+                "#aaa79b", 1.05, 0.72
+            );
+        }
+    }
+}
+
+
+/* =====================================
+   6. INNER SPINES
+===================================== */
+
+function drawInnerSpines(time, sway) {
+
+    for (let side of [-1, 1]) {
+
+        for (let i = 0; i < 15; i++) {
+
+            const t = 0.19 + i * 0.047;
+            const anchor = bodyPoint(t, sway);
+
+            const length = 75 + i * 7;
+            const wave = Math.sin(time * 0.0015 + i * 0.55);
+
+            const end = {
+                x: anchor.x + side * length,
+                y: anchor.y - length * 1.03
+            };
+
+            drawCurve(
+                anchor,
+                {
+                    x: anchor.x + side * length * 0.35,
+                    y: anchor.y - 22
+                },
+                {
+                    x: anchor.x + side * length * 0.75,
+                    y: anchor.y - length * 0.64 + wave * 3
+                },
+                end,
+                "#68675f", 1.55, 0.82
+            );
+        }
+    }
+}
+
+
+/* =====================================
+   7. REPTILE BODY
+===================================== */
+
+function drawBody(sway) {
+
+    const points = [];
+
+    for (let i = 0; i <= 80; i++) {
+        points.push(bodyPoint(i / 80, sway));
+    }
+
+    /* Soft body shadow */
+    strokePath(points, "#77756b", 28, 0.40);
+
+    /* Main body */
+    strokePath(points, "#a9a69a", 22, 1);
+
+    /* Center highlight */
+    strokePath(points, "#d4d0c3", 8, 0.65);
+
+    /* Dark edge */
+    strokePath(points, "#77756b", 1.3, 0.7);
+}
+
+
+/* =====================================
+   8. BODY SEGMENTS AND SCALES
+===================================== */
+
+function drawSegments(sway) {
+
+    for (let i = 0; i < 21; i++) {
+
+        const t = 0.04 + i * 0.044;
+        const p = bodyPoint(t, sway);
+        const tangent = bodyTangent(t, sway);
+
+        const angle = Math.atan2(
+            tangent.y, tangent.x
+        );
+
+        const size = 7.5 + Math.sin(i * 0.4) * 1.2;
+
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(angle);
+
+        /* Segment shading */
+        const gradient = ctx.createLinearGradient(
+            0, -size, 0, size
+        );
+
+        gradient.addColorStop(0, "#5e5d55");
+        gradient.addColorStop(0.45, "#d0cdc1");
+        gradient.addColorStop(1, "#77766c");
+
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 13, size, 0, 0, Math.PI * 2);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        /* Individual scale details */
+        ctx.beginPath();
+        ctx.moveTo(-8, -size + 1);
+        ctx.quadraticCurveTo(0, size + 3, 8, -size + 1);
+        ctx.strokeStyle = "#65645c";
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+
+        ctx.restore();
+    }
+}
+
+
+/* =====================================
+   9. REPTILE HEAD
+===================================== */
+
+function drawHead(time, sway) {
+
+    const p = bodyPoint(1, sway);
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(-0.30 + pointer.angle * 0.25);
+
+    /* Rear neck connection */
+    ctx.beginPath();
+    ctx.ellipse(8, -4, 24, 14, -0.35, 0, Math.PI * 2);
+    ctx.fillStyle = "#8b897f";
+    ctx.fill();
+
+    /* Head silhouette */
+    ctx.beginPath();
+    ctx.moveTo(-9, -20);
+    ctx.bezierCurveTo(
+        -27, -27,
+        -51, -18,
+        -59, -3
+    );
+    ctx.bezierCurveTo(
+        -75, 10,
+        -70, 27,
+        -53, 32
+    );
+    ctx.bezierCurveTo(
+        -37, 40,
+        -13, 28,
+        -1, 15
+    );
+    ctx.bezierCurveTo(
+        10, 4,
+        7, -12,
+        -9, -20
+    );
+
+    ctx.fillStyle = "#080908";
+    ctx.fill();
+
+    /* Jaw detail */
+    ctx.beginPath();
+    ctx.moveTo(-58, 15);
+    ctx.quadraticCurveTo(-34, 34, -10, 14);
+    ctx.quadraticCurveTo(-30, 40, -53, 28);
+    ctx.fillStyle = "#e5e1d5";
+    ctx.fill();
+
+    /* Mouth highlight */
+    ctx.beginPath();
+    ctx.moveTo(-55, 10);
+    ctx.quadraticCurveTo(-35, 19, -17, 9);
+    ctx.strokeStyle = "#d7d3c7";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    /* Eye */
+    ctx.beginPath();
+    ctx.arc(-14, -12, 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#f2eee2";
+    ctx.fill();
+
+    ctx.restore();
+}
+
+
+/* =====================================
+   10. COMPLETE CREATURE
+===================================== */
+
+function drawCreature(time) {
+
+    const sway =
+        pointer.x * 0.13 +
+        pointer.velocityX * 0.35;
+
+    ctx.save();
+
+    const scale = Math.min(
+        W / 1000,
+        H / 650
+    ) * 0.94;
+
+    ctx.translate(W / 2 + pointer.x, H / 2 + pointer.y);
+    ctx.scale(scale, scale);
+
+    /* Gentle rotation */
+    ctx.rotate(pointer.angle);
+
+    /* Drawing order matters */
+    drawOuterSpines(time, sway);
+    drawInnerSpines(time, sway);
+    drawBody(sway);
+    drawSegments(sway);
+    drawHead(time, sway);
+
+    ctx.restore();
+}
+
+
+/* =====================================
+   11. ANIMATION LOOP
+===================================== */
+
+let previousTime = 0;
+
+function animate(time) {
+
+    const dt = Math.min(
+        (time - previousTime) / 16.67 || 1,
+        2
+    );
+
+    previousTime = time;
+
+    /* Smooth spring-like follow */
+    const ease = 1 - Math.pow(0.90, dt);
+
+    const oldX = pointer.x;
+    const oldY = pointer.y;
+
+    pointer.x += (pointer.targetX - pointer.x) * ease;
+    pointer.y += (pointer.targetY - pointer.y) * ease;
+
+    pointer.velocityX = pointer.x - oldX;
+    pointer.velocityY = pointer.y - oldY;
+
+    pointer.angle +=
+        (pointer.targetAngle - pointer.angle) *
+        (1 - Math.pow(0.92, dt));
+
+    ctx.clearRect(0, 0, W, H);
+
+    drawCreature(time);
+
+    requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+
+
+/* =====================================
+   12. MOBILE HAND TRACKING
+===================================== */
+
+let handCamera = null;
+let handModel = null;
+
+cameraButton.addEventListener("click", async () => {
+
+    cameraButton.disabled = true;
+    cameraButton.textContent = "INITIALIZING...";
+
+    try {
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error("Camera requires HTTPS");
+        }
+
+        if (!window.Hands || !window.Camera) {
+            throw new Error("Hand tracking library unavailable");
+        }
+
+        handModel = new Hands({
+            locateFile: file =>
+                "https://cdn.jsdelivr.net/npm/@mediapipe/hands/" + file
+        });
+
+        handModel.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        handModel.onResults(results => {
+
+            const hands = results.multiHandLandmarks;
+
+            if (hands && hands.length) {
+
+                const palm = hands[0][9];
+
+                /* Mirror the horizontal camera movement */
+                pointer.targetX = (0.5 - palm.x) * 240;
+                pointer.targetY = (palm.y - 0.5) * 170;
+
+                pointer.targetAngle =
+                    (0.5 - palm.x) * 0.20;
+
+                statusText.textContent =
+                    "HAND TRACKING ACTIVE";
+
+            } else {
+                statusText.textContent =
+                    "SHOW YOUR HAND TO THE CAMERA";
+            }
+        });
+
+        handCamera = new Camera(video, {
+            onFrame: async () => {
+                await handModel.send({image: video});
+            },
+            width: 640,
+            height: 480
+        });
+
+        await handCamera.start();
+
+        cameraButton.textContent = "HAND CONTROL ACTIVE";
+
+    } catch (error) {
+
+        console.error(error);
+
+        statusText.textContent =
+            "CAMERA COULD NOT START";
+
+        cameraButton.disabled = false;
+        cameraButton.textContent = "TRY AGAIN";
+    }
+});
+
+
+/* =====================================
+   13. STARTUP
+===================================== */
+
+console.log(
+    "%c LIVING SERPENT ",
+    "background:#111;color:#d5d2c5;padding:8px;"
+);
+
+console.log("Interactive illustration initialized.");
+</script>
+
+</body>
+</html>
+```
